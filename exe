@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+#
+# exe - A portable custom shebang interpreter
+#
+# This script provides a predictable alternative to kernel-specific shebang
+# parsing by implementing its own command-line interpretation.
+#
+# THE PROBLEM:
+#   Traditional shebangs allow only one optional argument, and kernels parse
+#   this inconsistently:
+#
+#   #!/usr/bin/env head -4
+#
+#   Linux:   env "head -4" <script>        (treats as single argument)
+#   macOS:   env head -4 <script>          (splits on first space)
+#   illumos: Not reliably supported        (strictest interpretation)
+#
+# THE SOLUTION:
+#   Use a new convention: #!exe <command...>
+#   The script reads and parses its own shebang line with proper shell quoting.
+#
+# USAGE (Note that exe must be in the same dirrectory as the script):
+#   #!exe head -n 4
+#   #!exe awk 'NR <= 10'
+#   #!exe python3 -u
+#
+# DESIGN NOTES:
+#   - Supports proper shell quoting and escaping
+#   - No aliases (scripts must reference real executables)
+#   - Non-interactive (no rc files sourced)
+#   - Script arguments are forwarded after interpreter command
+#   - Falls back to normal exec for non-#!exe files
+#
+# PORTABILITY:
+#   Works on Linux, macOS, *BSD, and most POSIX systems with bash.
+#   Cannot work on illumos as a shebang due to kernel limitations.
+#
+
+set -euo pipefail
+
+# Determine script path (last argument)
+script="${!#}"
+
+# If the target is not a regular file, pass through to normal exec
+if [[ ! -f "${script}" ]]; then
+	exec "$@"
+fi
+
+# Read the first line of the script
+IFS= read -r first_line <"${script}" 2>/dev/null || first_line=""
+
+# If it's not an #!exe script, fall back to normal exec
+if [[ "${first_line}" != '#!exe'* ]]; then
+	exec "$@"
+fi
+
+# Extract the command line after #!exe
+cmdline="${first_line#'#!exe'}"
+
+# Trim leading whitespace
+cmdline="${cmdline#"${cmdline%%[![:space:]]*}"}"
+
+# Handle empty command line
+if [[ -z "${cmdline}" ]]; then
+	printf 'exe: error: empty command after #!exe\n' >&2
+	exit 1
+fi
+
+# Parse the command line with proper shell word splitting
+# Uses bash's own parser for correctness with quotes and escapes
+mapfile -t -d '' argv < <(
+	bash -c 'eval "set -- ${1}"; printf "%s\0" "$@"' _ "${cmdline}" 2>/dev/null
+) || {
+	printf 'exe: error: failed to parse command line: %s\n' "${cmdline}" >&2
+	exit 1
+}
+
+# Verify we got at least one element
+if [[ ${#argv[@]} -eq 0 ]]; then
+	printf 'exe: error: no command parsed from: %s\n' "${cmdline}" >&2
+	exit 1
+fi
+
+# Extract user arguments (everything except the script path)
+user_args=()
+if [[ $# -gt 1 ]]; then
+	user_args=("${@:1:$#-1}")
+fi
+
+# Execute the parsed command with the script on stdin
+exec "${argv[@]}" "${user_args[@]}" <"${script}"
