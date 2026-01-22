@@ -19,10 +19,17 @@
 #   Use a new convention: #!exe <command...>
 #   The script reads and parses its own shebang line with proper shell quoting.
 #
-# USAGE (Note that exe must be in the same dirrectory as the script):
+# USAGE (Note that exe must be in the same directory as the script):
 #   #!exe head -n 4
 #   #!exe awk 'NR <= 10'
 #   #!exe python3 -u
+#
+# FLAGS:
+#   --pop-shebang   Skip the shebang line when passing script to command.
+#                   By default, the entire script (including shebang) is piped to stdin.
+#                   Use this flag to exclude the #!exe line from the input.
+#
+#   Example: exe script.sh --pop-shebang
 #
 # DESIGN NOTES:
 #   - Supports proper shell quoting and escaping
@@ -38,8 +45,20 @@
 
 set -euo pipefail
 
-# Determine script path (last argument)
-script="${!#}"
+# Determine script path (first positional argument, others may include flags)
+script="${1:-}"
+
+# Check for --pop-shebang flag (can appear after script path)
+pop_shebang=0
+user_args=()
+for ((i = 2; i <= $#; i++)); do
+	arg="${!i}"
+	if [[ "$arg" == "--pop-shebang" ]]; then
+		pop_shebang=1
+	else
+		user_args+=("$arg")
+	fi
+done
 
 # If the target is not a regular file, pass through to normal exec
 if [[ ! -f "${script}" ]]; then
@@ -81,11 +100,10 @@ if [[ ${#argv[@]} -eq 0 ]]; then
 	exit 1
 fi
 
-# Extract user arguments (everything except the script path)
-user_args=()
-if [[ $# -gt 1 ]]; then
-	user_args=("${@:1:$#-1}")
+# If --pop-shebang is set, skip the first line (the shebang) and feed rest to stdin
+if [[ $pop_shebang -eq 1 ]]; then
+	exec "${argv[@]}" "${user_args[@]}" < <(tail -n +2 "${script}")
+else
+	# Execute the parsed command with the script on stdin
+	exec "${argv[@]}" "${user_args[@]}" <"${script}"
 fi
-
-# Execute the parsed command with the script on stdin
-exec "${argv[@]}" "${user_args[@]}" <"${script}"
